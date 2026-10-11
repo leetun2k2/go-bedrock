@@ -19,7 +19,7 @@ flowchart LR
 | [cachex](cachex/README.md) | Cache-aside with stampede control | Redis |
 | [featurestorex](featurestorex/README.md) | Online feature hashes | Redis 7.4+ for field TTL |
 | [leaderboardx](leaderboardx/README.md) | Ranked boards and metadata | Redis |
-| [matchingx](matchingx/README.md) | Vector matching with filters | Redis Search |
+| [recommendx](recommendx/README.md) | Recommendation retrieval with filters | Redis Search |
 | [memoryx](memoryx/README.md) | Agent state, semantic memory, and events | Redis Search and JSON |
 | [prefetchx](prefetchx/README.md) | Bulk-loaded reference cache | Redis |
 | [pubsubx](pubsubx/README.md) | Live channel broadcasts | Redis |

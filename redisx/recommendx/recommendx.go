@@ -1,8 +1,8 @@
-// Package matchingx matches query vectors against stored item vectors with
+// Package recommendx retrieves recommendation candidates by matching query
+// vectors against stored item vectors with
 // structured tag and numeric filters, using Redis Search vector KNN queries
-// (FT.CREATE and FT.SEARCH). It follows the official Redis recommendation
-// engine example.
-package matchingx
+// (FT.CREATE and FT.SEARCH).
+package recommendx
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 
 // ErrCapability is returned when the connected Redis server does not support
 // Redis Search vector commands.
-var ErrCapability = errors.New("matchingx: redis search module required")
+var ErrCapability = errors.New("recommendx: redis search module required")
 
 // tagSpecialChars matches characters that must be escaped inside a RediSearch
 // TAG query value.
@@ -43,17 +43,17 @@ type Query struct {
 	NumericFilters map[string][2]float64 // field name -> [min, max]
 }
 
-// MatchResult is one ranked match returned by Match.
-type MatchResult struct {
+// Recommendation is one ranked item returned by Recommend.
+type Recommendation struct {
 	ID            string
 	Score         float64 // distance/score returned by Redis Search
 	TagFields     map[string]string
 	NumericFields map[string]float64
 }
 
-// Matcher matches query vectors to ranked items backed by Redis Search. It is
+// Recommender retrieves ranked items backed by Redis Search. It is
 // safe for concurrent use and does not own the Redis connection it borrows.
-type Matcher struct {
+type Recommender struct {
 	client        *redis.Client
 	prefix        string
 	indexName     string
@@ -63,11 +63,11 @@ type Matcher struct {
 	numericFields []string
 }
 
-// New constructs a Matcher backed by client using cfg. New validates cfg and
+// New constructs a Recommender backed by client using cfg. New validates cfg and
 // returns an error without touching Redis if the configuration is invalid.
-func New(client *redisx.Client, cfg Config) (*Matcher, error) {
+func New(client *redisx.Client, cfg Config) (*Recommender, error) {
 	if client == nil {
-		return nil, errors.New("matchingx: client must not be nil")
+		return nil, errors.New("recommendx: client must not be nil")
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -75,7 +75,7 @@ func New(client *redisx.Client, cfg Config) (*Matcher, error) {
 	}
 	cfg = cfg.withDefaults()
 
-	return &Matcher{
+	return &Recommender{
 		client:        client.Client(),
 		prefix:        cfg.Prefix,
 		indexName:     cfg.IndexName,
@@ -88,26 +88,26 @@ func New(client *redisx.Client, cfg Config) (*Matcher, error) {
 
 // CreateIndex creates the Redis Search index used by Match. It returns nil when
 // an index with the same name already exists, without checking its schema.
-func (m *Matcher) CreateIndex(ctx context.Context) error {
+func (r *Recommender) CreateIndex(ctx context.Context) error {
 	args := []interface{}{
-		"FT.CREATE", m.indexName,
+		"FT.CREATE", r.indexName,
 		"ON", "HASH",
-		"PREFIX", "1", m.prefix + ":",
+		"PREFIX", "1", r.prefix + ":",
 		"SCHEMA",
 		"vector", "VECTOR", "HNSW", "6",
 		"TYPE", "FLOAT32",
-		"DIM", m.dimensions,
-		"DISTANCE_METRIC", m.metric,
+		"DIM", r.dimensions,
+		"DISTANCE_METRIC", r.metric,
 	}
 
-	for _, f := range m.tagFields {
+	for _, f := range r.tagFields {
 		args = append(args, f, "TAG")
 	}
-	for _, f := range m.numericFields {
+	for _, f := range r.numericFields {
 		args = append(args, f, "NUMERIC")
 	}
 
-	if err := m.client.Do(ctx, args...).Err(); err != nil {
+	if err := r.client.Do(ctx, args...).Err(); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			return nil
 		}
@@ -119,33 +119,33 @@ func (m *Matcher) CreateIndex(ctx context.Context) error {
 
 // UpsertItem writes item's vector and structured fields to its hash,
 // creating or replacing the fields the index reads.
-func (m *Matcher) UpsertItem(ctx context.Context, item Item) error {
+func (r *Recommender) UpsertItem(ctx context.Context, item Item) error {
 	if strings.TrimSpace(item.ID) == "" {
-		return errors.New("matchingx: item id must not be empty")
+		return errors.New("recommendx: item id must not be empty")
 	}
 
-	if len(item.Vector) != m.dimensions {
-		return fmt.Errorf("matchingx: vector must have %d dimensions, got %d", m.dimensions, len(item.Vector))
+	if len(item.Vector) != r.dimensions {
+		return fmt.Errorf("recommendx: vector must have %d dimensions, got %d", r.dimensions, len(item.Vector))
 	}
 
 	fields := make(map[string]interface{}, 1+len(item.TagFields)+len(item.NumericFields))
 	fields["vector"] = encodeVector(item.Vector)
 
 	for k, v := range item.TagFields {
-		if !contains(m.tagFields, k) {
-			return fmt.Errorf("matchingx: unknown tag field %q", k)
+		if !contains(r.tagFields, k) {
+			return fmt.Errorf("recommendx: unknown tag field %q", k)
 		}
 		fields[k] = v
 	}
 
 	for k, v := range item.NumericFields {
-		if !contains(m.numericFields, k) {
-			return fmt.Errorf("matchingx: unknown numeric field %q", k)
+		if !contains(r.numericFields, k) {
+			return fmt.Errorf("recommendx: unknown numeric field %q", k)
 		}
 		fields[k] = strconv.FormatFloat(v, 'f', -1, 64)
 	}
 
-	if err := m.client.HSet(ctx, m.key(item.ID), fields).Err(); err != nil {
+	if err := r.client.HSet(ctx, r.key(item.ID), fields).Err(); err != nil {
 		return wrapErr("upsert item", err)
 	}
 
@@ -153,30 +153,30 @@ func (m *Matcher) UpsertItem(ctx context.Context, item Item) error {
 }
 
 // DeleteItem removes id's item hash, taking it out of future matches.
-func (m *Matcher) DeleteItem(ctx context.Context, id string) error {
+func (r *Recommender) DeleteItem(ctx context.Context, id string) error {
 	if strings.TrimSpace(id) == "" {
-		return errors.New("matchingx: item id must not be empty")
+		return errors.New("recommendx: item id must not be empty")
 	}
 
-	if err := m.client.Del(ctx, m.key(id)).Err(); err != nil {
+	if err := r.client.Del(ctx, r.key(id)).Err(); err != nil {
 		return wrapErr("delete item", err)
 	}
 
 	return nil
 }
 
-// Match returns at most query.Limit items nearest to query.Vector, ordered by
+// Recommend returns at most query.Limit items nearest to query.Vector, ordered by
 // score, restricted to items matching query's tag and numeric filters.
-func (m *Matcher) Match(ctx context.Context, query Query) ([]MatchResult, error) {
-	if len(query.Vector) != m.dimensions {
-		return nil, fmt.Errorf("matchingx: vector must have %d dimensions, got %d", m.dimensions, len(query.Vector))
+func (r *Recommender) Recommend(ctx context.Context, query Query) ([]Recommendation, error) {
+	if len(query.Vector) != r.dimensions {
+		return nil, fmt.Errorf("recommendx: vector must have %d dimensions, got %d", r.dimensions, len(query.Vector))
 	}
 
 	if query.Limit <= 0 {
-		return nil, errors.New("matchingx: limit must be greater than zero")
+		return nil, errors.New("recommendx: limit must be greater than zero")
 	}
 
-	filter, err := m.buildFilter(query)
+	filter, err := r.buildFilter(query)
 	if err != nil {
 		return nil, err
 	}
@@ -184,21 +184,21 @@ func (m *Matcher) Match(ctx context.Context, query Query) ([]MatchResult, error)
 	queryStr := fmt.Sprintf("(%s)=>[KNN %d @vector $vec AS score]", filter, query.Limit)
 
 	args := []interface{}{
-		"FT.SEARCH", m.indexName, queryStr,
+		"FT.SEARCH", r.indexName, queryStr,
 		"PARAMS", "2", "vec", encodeVector(query.Vector),
 		"SORTBY", "score",
 		"LIMIT", "0", query.Limit,
 		"DIALECT", "2",
 	}
 
-	raw, err := m.client.Do(ctx, args...).Result()
+	raw, err := r.client.Do(ctx, args...).Result()
 	if err != nil {
 		return nil, wrapErr("match", err)
 	}
 
-	results, err := m.parseSearchReply(raw)
+	results, err := r.parseSearchReply(raw)
 	if err != nil {
-		return nil, fmt.Errorf("matchingx: match: %w", err)
+		return nil, fmt.Errorf("recommendx: recommend: %w", err)
 	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Score < results[j].Score })
@@ -208,19 +208,19 @@ func (m *Matcher) Match(ctx context.Context, query Query) ([]MatchResult, error)
 
 // buildFilter builds the RediSearch pre-filter query string for query,
 // returning "*" when no filters are set.
-func (m *Matcher) buildFilter(query Query) (string, error) {
+func (r *Recommender) buildFilter(query Query) (string, error) {
 	var parts []string
 
 	for field, val := range query.TagFilters {
-		if !contains(m.tagFields, field) {
-			return "", fmt.Errorf("matchingx: unknown tag field %q", field)
+		if !contains(r.tagFields, field) {
+			return "", fmt.Errorf("recommendx: unknown tag field %q", field)
 		}
 		parts = append(parts, fmt.Sprintf("@%s:{%s}", field, escapeTagValue(val)))
 	}
 
 	for field, rng := range query.NumericFilters {
-		if !contains(m.numericFields, field) {
-			return "", fmt.Errorf("matchingx: unknown numeric field %q", field)
+		if !contains(r.numericFields, field) {
+			return "", fmt.Errorf("recommendx: unknown numeric field %q", field)
 		}
 		parts = append(parts, fmt.Sprintf("@%s:[%s %s]", field, formatFloat(rng[0]), formatFloat(rng[1])))
 	}
@@ -234,29 +234,29 @@ func (m *Matcher) buildFilter(query Query) (string, error) {
 	return strings.Join(parts, " "), nil
 }
 
-// parseSearchReply converts a raw FT.SEARCH reply into MatchResults. Redis
+// parseSearchReply converts a raw FT.SEARCH reply into Recommendations. Redis
 // replies with a RESP3 map (one "results" entry per document, each holding
 // "id" and an "extra_attributes" field map) or, under RESP2, a flat array of
 // [total, key, fields, key, fields, ...].
-func (m *Matcher) parseSearchReply(raw interface{}) ([]MatchResult, error) {
+func (r *Recommender) parseSearchReply(raw interface{}) ([]Recommendation, error) {
 	switch root := raw.(type) {
 	case map[interface{}]interface{}:
-		return m.parseSearchReplyMap(root)
+		return r.parseSearchReplyMap(root)
 	case []interface{}:
-		return m.parseSearchReplyArray(root)
+		return r.parseSearchReplyArray(root)
 	default:
 		return nil, fmt.Errorf("unexpected search reply type %T", raw)
 	}
 }
 
 // parseSearchReplyMap parses the RESP3 map-shaped FT.SEARCH reply.
-func (m *Matcher) parseSearchReplyMap(root map[interface{}]interface{}) ([]MatchResult, error) {
+func (r *Recommender) parseSearchReplyMap(root map[interface{}]interface{}) ([]Recommendation, error) {
 	docs, ok := root["results"].([]interface{})
 	if !ok {
 		return nil, nil
 	}
 
-	results := make([]MatchResult, 0, len(docs))
+	results := make([]Recommendation, 0, len(docs))
 
 	for _, d := range docs {
 		doc, ok := d.(map[interface{}]interface{})
@@ -266,7 +266,7 @@ func (m *Matcher) parseSearchReplyMap(root map[interface{}]interface{}) ([]Match
 
 		fields, _ := doc["extra_attributes"].(map[interface{}]interface{})
 
-		result, err := m.parseResult(toString(doc["id"]), fields)
+		result, err := r.parseResult(toString(doc["id"]), fields)
 		if err != nil {
 			return nil, err
 		}
@@ -278,12 +278,12 @@ func (m *Matcher) parseSearchReplyMap(root map[interface{}]interface{}) ([]Match
 }
 
 // parseSearchReplyArray parses the RESP2 flat-array FT.SEARCH reply.
-func (m *Matcher) parseSearchReplyArray(arr []interface{}) ([]MatchResult, error) {
+func (r *Recommender) parseSearchReplyArray(arr []interface{}) ([]Recommendation, error) {
 	if len(arr) == 0 {
 		return nil, nil
 	}
 
-	results := make([]MatchResult, 0, (len(arr)-1)/2)
+	results := make([]Recommendation, 0, (len(arr)-1)/2)
 
 	for i := 1; i+1 < len(arr); i += 2 {
 		rawFields, ok := arr[i+1].([]interface{})
@@ -296,7 +296,7 @@ func (m *Matcher) parseSearchReplyArray(arr []interface{}) ([]MatchResult, error
 			fields[rawFields[j]] = rawFields[j+1]
 		}
 
-		result, err := m.parseResult(toString(arr[i]), fields)
+		result, err := r.parseResult(toString(arr[i]), fields)
 		if err != nil {
 			return nil, err
 		}
@@ -308,10 +308,10 @@ func (m *Matcher) parseSearchReplyArray(arr []interface{}) ([]MatchResult, error
 }
 
 // parseResult converts one FT.SEARCH document (key and field map) into a
-// MatchResult.
-func (m *Matcher) parseResult(key string, fields map[interface{}]interface{}) (MatchResult, error) {
-	result := MatchResult{
-		ID:            m.stripKey(key),
+// Recommendation.
+func (r *Recommender) parseResult(key string, fields map[interface{}]interface{}) (Recommendation, error) {
+	result := Recommendation{
+		ID:            r.stripKey(key),
 		TagFields:     map[string]string{},
 		NumericFields: map[string]float64{},
 	}
@@ -323,17 +323,17 @@ func (m *Matcher) parseResult(key string, fields map[interface{}]interface{}) (M
 		case name == "score":
 			score, err := toFloat64(value)
 			if err != nil {
-				return MatchResult{}, fmt.Errorf("parse score: %w", err)
+				return Recommendation{}, fmt.Errorf("parse score: %w", err)
 			}
 			result.Score = score
 		case name == "vector":
 			// Skip the raw vector blob; callers already have the vector.
-		case contains(m.tagFields, name):
+		case contains(r.tagFields, name):
 			result.TagFields[name] = toString(value)
-		case contains(m.numericFields, name):
+		case contains(r.numericFields, name):
 			f, err := toFloat64(value)
 			if err != nil {
-				return MatchResult{}, fmt.Errorf("parse field %q: %w", name, err)
+				return Recommendation{}, fmt.Errorf("parse field %q: %w", name, err)
 			}
 			result.NumericFields[name] = f
 		}
@@ -343,14 +343,14 @@ func (m *Matcher) parseResult(key string, fields map[interface{}]interface{}) (M
 }
 
 // key returns the Redis hash key for item id.
-func (m *Matcher) key(id string) string {
-	return m.prefix + ":" + id
+func (r *Recommender) key(id string) string {
+	return r.prefix + ":" + id
 }
 
-// stripKey removes this Matcher's prefix from key, returning the original
+// stripKey removes this Recommender's prefix from key, returning the original
 // item id.
-func (m *Matcher) stripKey(key string) string {
-	return strings.TrimPrefix(key, m.prefix+":")
+func (r *Recommender) stripKey(key string) string {
+	return strings.TrimPrefix(key, r.prefix+":")
 }
 
 // encodeVector encodes vec as IEEE 754 float32 little-endian bytes, the
@@ -411,7 +411,7 @@ func toFloat64(v interface{}) (float64, error) {
 	}
 }
 
-// wrapErr wraps err with the matchingx prefix and op, mapping unknown command
+// wrapErr wraps err with the recommendx prefix and op, mapping unknown command
 // errors to ErrCapability.
 func wrapErr(op string, err error) error {
 	if err == nil {
@@ -419,8 +419,8 @@ func wrapErr(op string, err error) error {
 	}
 
 	if strings.Contains(strings.ToLower(err.Error()), "unknown command") {
-		return fmt.Errorf("matchingx: %s: %w", op, ErrCapability)
+		return fmt.Errorf("recommendx: %s: %w", op, ErrCapability)
 	}
 
-	return fmt.Errorf("matchingx: %s: %w", op, err)
+	return fmt.Errorf("recommendx: %s: %w", op, err)
 }

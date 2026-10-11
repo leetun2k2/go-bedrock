@@ -1,4 +1,4 @@
-package matchingx
+package recommendx
 
 import (
 	"errors"
@@ -11,9 +11,9 @@ var validDistanceMetrics = map[string]bool{
 	"IP":     true,
 }
 
-// Config configures a Matcher.
+// Config configures a Recommender.
 //
-// Prefix namespaces every item hash key so multiple matchingx matchers can
+// Prefix namespaces every item hash key so multiple recommenders can
 // share one Redis database without colliding. IndexName names the Redis
 // Search index created by CreateIndex. TagFields and NumericFields declare
 // the structured fields available for filtering in Match.
@@ -29,20 +29,20 @@ type Config struct {
 // validate reports whether c holds a usable configuration.
 func (c Config) validate() error {
 	if strings.TrimSpace(c.Prefix) == "" {
-		return errors.New("matchingx: prefix must not be empty")
+		return errors.New("recommendx: prefix must not be empty")
 	}
 
 	if strings.TrimSpace(c.IndexName) == "" {
-		return errors.New("matchingx: index name must not be empty")
+		return errors.New("recommendx: index name must not be empty")
 	}
 
 	if c.Dimensions <= 0 {
-		return errors.New("matchingx: dimensions must be greater than zero")
+		return errors.New("recommendx: dimensions must be greater than zero")
 	}
 
 	metric := strings.ToUpper(strings.TrimSpace(c.DistanceMetric))
 	if metric != "" && !validDistanceMetrics[metric] {
-		return errors.New("matchingx: distance metric must be COSINE, L2, or IP")
+		return errors.New("recommendx: distance metric must be COSINE, L2, or IP")
 	}
 
 	return nil

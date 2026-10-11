@@ -139,7 +139,7 @@ Use the package guide for config and behavior:
 - [cachex](cachex/USAGE.md)
 - [featurestorex](featurestorex/USAGE.md)
 - [leaderboardx](leaderboardx/USAGE.md)
-- [matchingx](matchingx/USAGE.md)
+- [recommendx](recommendx/USAGE.md)
 - [memoryx](memoryx/USAGE.md)
 - [prefetchx](prefetchx/USAGE.md)
 - [pubsubx](pubsubx/USAGE.md)

@@ -1,13 +1,13 @@
-# Using matchingx
+# Using recommendx
 
 Use Redis Stack or another Redis deployment with Redis Search.
 `rdb` below is a shared `*redisx.Client` created as shown in the parent
 [USAGE.md](../USAGE.md).
 
-## Create the matcher and index
+## Create the recommender and index
 
 ```go
-matcher, err := matchingx.New(rdb, matchingx.Config{
+recommender, err := recommendx.New(rdb, recommendx.Config{
 	Prefix:         "catalog:item",
 	IndexName:      "catalog-items",
 	Dimensions:     3,
@@ -19,7 +19,7 @@ if err != nil {
 	return err
 }
 
-if err := matcher.CreateIndex(ctx); err != nil {
+if err := recommender.CreateIndex(ctx); err != nil {
 	return err
 }
 ```
@@ -30,7 +30,7 @@ safe. Changing its schema needs an explicit index migration.
 ## Store items
 
 ```go
-err = matcher.UpsertItem(ctx, matchingx.Item{
+err = recommender.UpsertItem(ctx, recommendx.Item{
 	ID:     "item-42",
 	Vector: []float32{0.12, 0.83, 0.44},
 	TagFields: map[string]string{
@@ -44,10 +44,10 @@ err = matcher.UpsertItem(ctx, matchingx.Item{
 The vector length must match `Dimensions`. Fields not declared in config are
 rejected.
 
-## Match
+## Recommend
 
 ```go
-results, err := matcher.Match(ctx, matchingx.Query{
+results, err := recommender.Recommend(ctx, recommendx.Query{
 	Vector:     []float32{0.10, 0.80, 0.40},
 	Limit:      10,
 	TagFilters: map[string]string{"category": "book"},
@@ -55,7 +55,7 @@ results, err := matcher.Match(ctx, matchingx.Query{
 		"price": {10, 30},
 	},
 })
-if errors.Is(err, matchingx.ErrCapability) {
+if errors.Is(err, recommendx.ErrCapability) {
 	return ErrSearchUnavailable
 }
 ```
