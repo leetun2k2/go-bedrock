@@ -1,343 +1,335 @@
-// Package sessionx provides shared web session storage backed by Redis. Each
-// session is a hash with a sliding TTL, indexed by a per-user set of session
-// IDs so all of a user's sessions can be revoked together. Session creation,
-// deletion, and logout-all run through Lua scripts so the session hash and
-// its user index never drift out of sync.
+// Package sessionstore provides a Redis-backed session store for Go web applications.
+//
+// It stores session data in Redis hashes and uses key expiration to remove
+// inactive sessions automatically.
 package sessionx
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
-	"fmt"
-	"strings"
+	"strconv"
+	"time"
 
-	"github.com/leetun2k2/go-bedrock/redisx"
 	"github.com/redis/go-redis/v9"
 )
 
-// userIDField is the reserved hash field used to remember which user a
-// session belongs to, so Delete and the sliding-TTL scripts can locate the
-// matching user index set without a second lookup key.
-const userIDField = "_sessionx_user_id"
+var reservedSessionFields = map[string]bool{
+	"created_at":       true,
+	"last_accessed_at": true,
+	"session_ttl":      true,
+}
 
-// ErrNotFound is returned when a session does not exist or has expired.
-var ErrNotFound = errors.New("sessionx: session not found")
+// SessionStoreConfig holds Redis session store configuration.
+type SessionStoreConfig struct {
+	// Prefix is the key prefix used for session keys. Default: "session:"
+	Prefix string
 
-// createScript stores session fields, sets the session TTL, and adds the
-// session ID to the user index set with a matching TTL. If the session ID
-// already belonged to a different user, it is atomically removed from that
-// user's index set first, so a reassigned session ID never leaves a stale
-// membership behind. KEYS[1] is the session key, KEYS[2] is the user index
-// set key. ARGV[1] is the TTL in seconds, ARGV[2] is the session ID, ARGV[3]
-// is the user ID, ARGV[4] is the user index key prefix, and ARGV[5:] are
-// field/value pairs.
-const createScript = `
-local ttl = ARGV[1]
-local session_id = ARGV[2]
-local user_id = ARGV[3]
-local user_prefix = ARGV[4]
+	// TTL is the default session TTL in seconds. Default: 1800
+	TTL int
+}
 
-local prior_user_id = redis.call('HGET', KEYS[1], '` + userIDField + `')
-if prior_user_id and prior_user_id ~= user_id then
-	redis.call('SREM', user_prefix .. prior_user_id, session_id)
-end
-
-if #ARGV > 4 then
-	redis.call('HSET', KEYS[1], unpack(ARGV, 5))
-end
-redis.call('EXPIRE', KEYS[1], ttl)
-redis.call('SADD', KEYS[2], session_id)
-redis.call('EXPIRE', KEYS[2], ttl)
-return 1
-`
-
-// getScript returns the full session hash and refreshes the sliding TTL on
-// the session and its user index set. KEYS[1] is the session key. ARGV[1] is
-// the TTL in seconds, ARGV[2] is the user index key prefix.
-const getScript = `
-local data = redis.call('HGETALL', KEYS[1])
-if #data == 0 then
-	return {}
-end
-
-redis.call('EXPIRE', KEYS[1], ARGV[1])
-
-local user_id = redis.call('HGET', KEYS[1], '` + userIDField + `')
-if user_id then
-	redis.call('EXPIRE', ARGV[2] .. user_id, ARGV[1])
-end
-
-return data
-`
-
-// setFieldsScript updates fields on an existing session and refreshes the
-// sliding TTL. KEYS[1] is the session key. ARGV[1] is the TTL in seconds,
-// ARGV[2] is the user index key prefix, and ARGV[3:] are field/value pairs.
-const setFieldsScript = `
-if redis.call('EXISTS', KEYS[1]) == 0 then
-	return 0
-end
-
-if #ARGV > 2 then
-	redis.call('HSET', KEYS[1], unpack(ARGV, 3))
-end
-redis.call('EXPIRE', KEYS[1], ARGV[1])
-
-local user_id = redis.call('HGET', KEYS[1], '` + userIDField + `')
-if user_id then
-	redis.call('EXPIRE', ARGV[2] .. user_id, ARGV[1])
-end
-
-return 1
-`
-
-// touchScript refreshes the sliding TTL on a session and its user index set
-// without modifying fields. KEYS[1] is the session key. ARGV[1] is the TTL
-// in seconds, ARGV[2] is the user index key prefix.
-const touchScript = `
-if redis.call('EXISTS', KEYS[1]) == 0 then
-	return 0
-end
-
-redis.call('EXPIRE', KEYS[1], ARGV[1])
-
-local user_id = redis.call('HGET', KEYS[1], '` + userIDField + `')
-if user_id then
-	redis.call('EXPIRE', ARGV[2] .. user_id, ARGV[1])
-end
-
-return 1
-`
-
-// deleteScript reads the owning user ID from the session hash, deletes the
-// session key, and removes the session ID from the user index set. KEYS[1]
-// is the session key. ARGV[1] is the user index key prefix, ARGV[2] is the
-// session ID.
-const deleteScript = `
-local user_id = redis.call('HGET', KEYS[1], '` + userIDField + `')
-redis.call('DEL', KEYS[1])
-
-if user_id then
-	redis.call('SREM', ARGV[1] .. user_id, ARGV[2])
-end
-
-return 1
-`
-
-// deleteUserSessionsScript reads all session IDs from the user index set,
-// deletes each session key, and clears the user index set. KEYS[1] is the
-// user index set key. ARGV[1] is the session key prefix.
-const deleteUserSessionsScript = `
-local session_ids = redis.call('SMEMBERS', KEYS[1])
-for _, session_id in ipairs(session_ids) do
-	redis.call('DEL', ARGV[1] .. session_id)
-end
-redis.call('DEL', KEYS[1])
-return #session_ids
-`
-
-// Store is a Redis-backed session store with sliding TTL and multi-device
-// logout support. It is safe for concurrent use and does not own the Redis
-// connection it borrows.
-type Store struct {
+// RedisSessionStore stores session data in Redis hashes.
+type RedisSessionStore struct {
 	client *redis.Client
-
-	sessionPrefix string
-	userPrefix    string
-	ttlSeconds    int64
-
-	create             *redis.Script
-	get                *redis.Script
-	setFields          *redis.Script
-	touch              *redis.Script
-	delete             *redis.Script
-	deleteUserSessions *redis.Script
+	prefix string
+	ttl    int
 }
 
-// New constructs a Store backed by client using cfg. New validates cfg and
-// returns an error without touching Redis if the configuration is invalid.
-func New(client *redisx.Client, cfg Config) (*Store, error) {
+// NewRedisSessionStore creates a new RedisSessionStore.
+func NewRedisSessionStore(client *redis.Client, cfg SessionStoreConfig) *RedisSessionStore {
 	if client == nil {
-		return nil, errors.New("sessionx: client must not be nil")
+		panic("sessionstore: Client is required")
+	}
+	if cfg.Prefix == "" {
+		cfg.Prefix = "session:"
+	}
+	if cfg.TTL == 0 {
+		cfg.TTL = 1800
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, err
+	store := &RedisSessionStore{
+		client: client,
+		prefix: cfg.Prefix,
+		ttl:    cfg.TTL,
 	}
 
-	return &Store{
-		client:             client.Client(),
-		sessionPrefix:      cfg.Prefix + ":session:",
-		userPrefix:         cfg.Prefix + ":user:",
-		ttlSeconds:         int64(cfg.TTL.Seconds()),
-		create:             redis.NewScript(createScript),
-		get:                redis.NewScript(getScript),
-		setFields:          redis.NewScript(setFieldsScript),
-		touch:              redis.NewScript(touchScript),
-		delete:             redis.NewScript(deleteScript),
-		deleteUserSessions: redis.NewScript(deleteUserSessionsScript),
-	}, nil
+	if _, err := store.normalizeTTL(cfg.TTL); err != nil {
+		panic(err)
+	}
+
+	return store
 }
 
-// Create atomically stores fields in a session hash, sets the session TTL,
-// and adds sessionID to userID's session set with a matching sliding TTL.
-func (s *Store) Create(ctx context.Context, sessionID, userID string, fields map[string]string) error {
-	if strings.TrimSpace(sessionID) == "" {
-		return errors.New("sessionx: session id must not be empty")
+func (s *RedisSessionStore) normalizeTTL(ttl int) (int, error) {
+	value := ttl
+	if value == 0 {
+		value = s.ttl
 	}
-
-	if strings.TrimSpace(userID) == "" {
-		return errors.New("sessionx: user id must not be empty")
+	if value < 1 {
+		return 0, errors.New("TTL must be at least 1 second")
 	}
-
-	if _, reserved := fields[userIDField]; reserved {
-		return fmt.Errorf("sessionx: field name %q is reserved", userIDField)
-	}
-
-	argv := make([]interface{}, 0, 4+2*(len(fields)+1))
-	argv = append(argv, s.ttlSeconds, sessionID, userID, s.userPrefix, userIDField, userID)
-	for field, value := range fields {
-		argv = append(argv, field, value)
-	}
-
-	keys := []string{s.sessionKey(sessionID), s.userKey(userID)}
-	if err := s.create.Run(ctx, s.client, keys, argv...).Err(); err != nil {
-		return fmt.Errorf("sessionx: create: %w", err)
-	}
-
-	return nil
+	return value, nil
 }
 
-// Get returns a session's fields, refreshing the sliding TTL on the session
-// and its user index set. Get returns ErrNotFound if the session does not
-// exist or has expired.
-func (s *Store) Get(ctx context.Context, sessionID string) (map[string]string, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		return nil, errors.New("sessionx: session id must not be empty")
-	}
-
-	keys := []string{s.sessionKey(sessionID)}
-	res, err := s.get.Run(ctx, s.client, keys, s.ttlSeconds, s.userPrefix).Result()
+func (s *RedisSessionStore) normalizeTTLString(value string) (int, error) {
+	ttl, err := strconv.Atoi(value)
 	if err != nil {
-		return nil, fmt.Errorf("sessionx: get: %w", err)
+		return 0, err
 	}
-
-	values, ok := res.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("sessionx: get: unexpected script result: %v", res)
-	}
-
-	if len(values) == 0 {
-		return nil, ErrNotFound
-	}
-
-	fields := make(map[string]string, len(values)/2)
-	for i := 0; i+1 < len(values); i += 2 {
-		key, ok := values[i].(string)
-		if !ok {
-			return nil, fmt.Errorf("sessionx: get: unexpected field type: %T", values[i])
-		}
-		if key == userIDField {
-			continue
-		}
-		value, ok := values[i+1].(string)
-		if !ok {
-			return nil, fmt.Errorf("sessionx: get: unexpected value type: %T", values[i+1])
-		}
-		fields[key] = value
-	}
-
-	return fields, nil
+	return s.normalizeTTL(ttl)
 }
 
-// SetFields updates fields on an existing session and refreshes its sliding
-// TTL. SetFields returns ErrNotFound if the session does not exist.
-func (s *Store) SetFields(ctx context.Context, sessionID string, fields map[string]string) error {
-	if strings.TrimSpace(sessionID) == "" {
-		return errors.New("sessionx: session id must not be empty")
+func (s *RedisSessionStore) sessionKey(sessionID string) string {
+	return s.prefix + sessionID
+}
+
+func (s *RedisSessionStore) timestamp() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05+00:00")
+}
+
+func isValidSession(session map[string]string) bool {
+	if len(session) == 0 {
+		return false
 	}
 
-	if _, reserved := fields[userIDField]; reserved {
-		return fmt.Errorf("sessionx: field name %q is reserved", userIDField)
+	for field := range reservedSessionFields {
+		if _, ok := session[field]; !ok {
+			return false
+		}
 	}
 
-	argv := make([]interface{}, 0, 2+2*len(fields))
-	argv = append(argv, s.ttlSeconds, s.userPrefix)
-	for field, value := range fields {
-		argv = append(argv, field, value)
-	}
+	return true
+}
 
-	keys := []string{s.sessionKey(sessionID)}
-	ok, err := s.setFields.Run(ctx, s.client, keys, argv...).Int64()
+func randomSessionID() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+// CreateSession creates a new session and returns its opaque session ID.
+func (s *RedisSessionStore) CreateSession(
+	ctx context.Context,
+	data map[string]string,
+	ttl int,
+) (string, error) {
+	sessionID, err := randomSessionID()
 	if err != nil {
-		return fmt.Errorf("sessionx: set fields: %w", err)
+		return "", err
 	}
 
-	if ok == 0 {
-		return ErrNotFound
-	}
-
-	return nil
-}
-
-// Touch extends the TTL of a session and its user index set without
-// modifying fields. Touch returns ErrNotFound if the session does not exist.
-func (s *Store) Touch(ctx context.Context, sessionID string) error {
-	if strings.TrimSpace(sessionID) == "" {
-		return errors.New("sessionx: session id must not be empty")
-	}
-
-	keys := []string{s.sessionKey(sessionID)}
-	ok, err := s.touch.Run(ctx, s.client, keys, s.ttlSeconds, s.userPrefix).Int64()
+	key := s.sessionKey(sessionID)
+	now := s.timestamp()
+	sessionTTL, err := s.normalizeTTL(ttl)
 	if err != nil {
-		return fmt.Errorf("sessionx: touch: %w", err)
+		return "", err
 	}
 
-	if ok == 0 {
-		return ErrNotFound
+	payload := map[string]string{
+		"created_at":       now,
+		"last_accessed_at": now,
+		"session_ttl":      strconv.Itoa(sessionTTL),
 	}
 
-	return nil
+	for field, value := range data {
+		if !reservedSessionFields[field] {
+			payload[field] = value
+		}
+	}
+
+	pipe := s.client.TxPipeline()
+	pipe.HSet(ctx, key, payload)
+	pipe.Expire(ctx, key, time.Duration(sessionTTL)*time.Second)
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return sessionID, nil
 }
 
-// Delete atomically removes a session and its membership in the owning
-// user's session set. Delete does not report an error if the session does
-// not exist.
-func (s *Store) Delete(ctx context.Context, sessionID string) error {
-	if strings.TrimSpace(sessionID) == "" {
-		return errors.New("sessionx: session id must not be empty")
+// GetConfiguredTTL returns the configured TTL for a session.
+func (s *RedisSessionStore) GetConfiguredTTL(
+	ctx context.Context,
+	sessionID string,
+) (int, bool, error) {
+	storedTTL, err := s.client.HGet(ctx, s.sessionKey(sessionID), "session_ttl").Result()
+	if err == redis.Nil {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
 	}
 
-	keys := []string{s.sessionKey(sessionID)}
-	if err := s.delete.Run(ctx, s.client, keys, s.userPrefix, sessionID).Err(); err != nil {
-		return fmt.Errorf("sessionx: delete: %w", err)
+	ttl, err := s.normalizeTTLString(storedTTL)
+	if err != nil {
+		return 0, false, err
 	}
 
-	return nil
+	return ttl, true, nil
 }
 
-// DeleteUserSessions atomically deletes every session belonging to userID
-// and clears the user's session set, logging the user out of all devices.
-// DeleteUserSessions does not report an error if the user has no sessions.
-func (s *Store) DeleteUserSessions(ctx context.Context, userID string) error {
-	if strings.TrimSpace(userID) == "" {
-		return errors.New("sessionx: user id must not be empty")
+// GetSession returns session data for a session ID.
+func (s *RedisSessionStore) GetSession(
+	ctx context.Context,
+	sessionID string,
+	refreshTTL bool,
+) (map[string]string, bool, error) {
+	key := s.sessionKey(sessionID)
+	session, err := s.client.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, false, err
+	}
+	if !isValidSession(session) {
+		return nil, false, nil
 	}
 
-	keys := []string{s.userKey(userID)}
-	if err := s.deleteUserSessions.Run(ctx, s.client, keys, s.sessionPrefix).Err(); err != nil {
-		return fmt.Errorf("sessionx: delete user sessions: %w", err)
+	if !refreshTTL {
+		return session, true, nil
 	}
 
-	return nil
+	sessionTTL, err := s.normalizeTTLString(session["session_ttl"])
+	if err != nil {
+		return nil, false, err
+	}
+
+	pipe := s.client.TxPipeline()
+	pipe.HSet(ctx, key, map[string]string{"last_accessed_at": s.timestamp()})
+	pipe.Expire(ctx, key, time.Duration(sessionTTL)*time.Second)
+	getCmd := pipe.HGetAll(ctx, key)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, false, err
+	}
+
+	refreshed := getCmd.Val()
+	if !isValidSession(refreshed) {
+		return nil, false, nil
+	}
+
+	return refreshed, true, nil
 }
 
-// sessionKey returns the Redis key for a session hash.
-func (s *Store) sessionKey(sessionID string) string {
-	return s.sessionPrefix + sessionID
+// UpdateSession updates session fields and refreshes the TTL.
+func (s *RedisSessionStore) UpdateSession(
+	ctx context.Context,
+	sessionID string,
+	data map[string]string,
+) (bool, error) {
+	key := s.sessionKey(sessionID)
+	session, err := s.client.HGetAll(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	if !isValidSession(session) {
+		return false, nil
+	}
+
+	payload := map[string]string{}
+	for field, value := range data {
+		if !reservedSessionFields[field] {
+			payload[field] = value
+		}
+	}
+
+	if len(payload) == 0 {
+		return true, nil
+	}
+
+	sessionTTL, err := s.normalizeTTLString(session["session_ttl"])
+	if err != nil {
+		return false, err
+	}
+	payload["last_accessed_at"] = s.timestamp()
+
+	pipe := s.client.TxPipeline()
+	pipe.HSet(ctx, key, payload)
+	pipe.Expire(ctx, key, time.Duration(sessionTTL)*time.Second)
+	_, err = pipe.Exec(ctx)
+	return err == nil, err
 }
 
-// userKey returns the Redis key for a user's session index set.
-func (s *Store) userKey(userID string) string {
-	return s.userPrefix + userID
+// IncrementField increments a numeric session field and refreshes the TTL.
+func (s *RedisSessionStore) IncrementField(
+	ctx context.Context,
+	sessionID, field string,
+	amount int64,
+) (int64, bool, error) {
+	key := s.sessionKey(sessionID)
+	session, err := s.client.HGetAll(ctx, key).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	if !isValidSession(session) {
+		return 0, false, nil
+	}
+
+	sessionTTL, err := s.normalizeTTLString(session["session_ttl"])
+	if err != nil {
+		return 0, false, err
+	}
+
+	pipe := s.client.TxPipeline()
+	incrCmd := pipe.HIncrBy(ctx, key, field, amount)
+	pipe.HSet(ctx, key, map[string]string{"last_accessed_at": s.timestamp()})
+	pipe.Expire(ctx, key, time.Duration(sessionTTL)*time.Second)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, false, err
+	}
+
+	return incrCmd.Val(), true, nil
+}
+
+// SetSessionTTL updates the configured TTL for a session and applies it immediately.
+func (s *RedisSessionStore) SetSessionTTL(
+	ctx context.Context,
+	sessionID string,
+	ttl int,
+) (bool, error) {
+	key := s.sessionKey(sessionID)
+	session, err := s.client.HGetAll(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	if !isValidSession(session) {
+		return false, nil
+	}
+
+	sessionTTL, err := s.normalizeTTL(ttl)
+	if err != nil {
+		return false, err
+	}
+
+	pipe := s.client.TxPipeline()
+	pipe.HSet(ctx, key, map[string]string{
+		"session_ttl":      strconv.Itoa(sessionTTL),
+		"last_accessed_at": s.timestamp(),
+	})
+	pipe.Expire(ctx, key, time.Duration(sessionTTL)*time.Second)
+	_, err = pipe.Exec(ctx)
+	return err == nil, err
+}
+
+// DeleteSession deletes a session from Redis.
+func (s *RedisSessionStore) DeleteSession(
+	ctx context.Context,
+	sessionID string,
+) (bool, error) {
+	deleted, err := s.client.Del(ctx, s.sessionKey(sessionID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return deleted == 1, nil
+}
+
+// GetTTL returns the remaining TTL for a session in whole seconds.
+func (s *RedisSessionStore) GetTTL(ctx context.Context, sessionID string) (int, error) {
+	ttl, err := s.client.TTL(ctx, s.sessionKey(sessionID)).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(ttl.Seconds()), nil
 }
