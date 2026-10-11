@@ -1,42 +1,98 @@
 package ratelimitx
 
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
-)
+import "time"
 
-// Config configures a token-bucket rate limiter.
-//
-// Prefix namespaces every bucket key so multiple limiters can share one Redis
-// database without colliding. Capacity is the maximum number of tokens a
-// bucket can hold. RefillAmount tokens are added every RefillInterval,
-// elapsed server-side, up to Capacity.
-type Config struct {
+// FixedWindowConfig configures a fixed-window limiter. Accepted cost counts
+// against Limit within the current epoch-aligned Window; capacity resets at
+// the next window boundary.
+type FixedWindowConfig struct {
+	Prefix string
+	Limit  int64
+	Window time.Duration
+}
+
+func (c FixedWindowConfig) validate() (windowMs int64, err error) {
+	if err := validatePrefix(c.Prefix); err != nil {
+		return 0, err
+	}
+
+	if err := validatePositive("limit", c.Limit); err != nil {
+		return 0, err
+	}
+
+	return validateIntervalMs("window", c.Window)
+}
+
+// TokenBucketConfig configures a token-bucket limiter. A bucket starts full
+// at Capacity, gains RefillAmount tokens after each complete
+// RefillInterval, and never exceeds Capacity.
+type TokenBucketConfig struct {
 	Prefix         string
 	Capacity       int64
 	RefillAmount   int64
 	RefillInterval time.Duration
 }
 
-// validate reports whether c holds a usable configuration.
-func (c Config) validate() error {
-	if strings.TrimSpace(c.Prefix) == "" {
-		return errors.New("ratelimitx: prefix must not be empty")
+func (c TokenBucketConfig) validate() (refillIntervalMs int64, err error) {
+	if err := validatePrefix(c.Prefix); err != nil {
+		return 0, err
 	}
 
-	if c.Capacity <= 0 {
-		return fmt.Errorf("ratelimitx: capacity must be greater than zero: %d", c.Capacity)
+	if err := validatePositive("capacity", c.Capacity); err != nil {
+		return 0, err
 	}
 
-	if c.RefillAmount <= 0 {
-		return fmt.Errorf("ratelimitx: refill amount must be greater than zero: %d", c.RefillAmount)
+	if err := validatePositive("refill amount", c.RefillAmount); err != nil {
+		return 0, err
 	}
 
-	if c.RefillInterval <= 0 {
-		return fmt.Errorf("ratelimitx: refill interval must be greater than zero: %s", c.RefillInterval)
+	return validateIntervalMs("refill interval", c.RefillInterval)
+}
+
+// LeakyBucketConfig configures a leaky-bucket meter limiter. A bucket starts
+// empty at zero occupancy, drains LeakAmount after each complete
+// LeakInterval down to zero, and admits cost only up to Capacity.
+type LeakyBucketConfig struct {
+	Prefix       string
+	Capacity     int64
+	LeakAmount   int64
+	LeakInterval time.Duration
+}
+
+func (c LeakyBucketConfig) validate() (leakIntervalMs int64, err error) {
+	if err := validatePrefix(c.Prefix); err != nil {
+		return 0, err
 	}
 
-	return nil
+	if err := validatePositive("capacity", c.Capacity); err != nil {
+		return 0, err
+	}
+
+	if err := validatePositive("leak amount", c.LeakAmount); err != nil {
+		return 0, err
+	}
+
+	return validateIntervalMs("leak interval", c.LeakInterval)
+}
+
+// SlidingWindowCounterConfig configures a sliding-window-counter limiter. It
+// estimates the active rolling window from the current and previous
+// epoch-aligned Window counters and admits only when the conservative
+// estimate plus cost does not exceed Limit.
+type SlidingWindowCounterConfig struct {
+	Prefix string
+	Limit  int64
+	Window time.Duration
+}
+
+func (c SlidingWindowCounterConfig) validate() (windowMs int64, err error) {
+	if err := validatePrefix(c.Prefix); err != nil {
+		return 0, err
+	}
+
+	if err := validatePositive("limit", c.Limit); err != nil {
+		return 0, err
+	}
+
+	return validateIntervalMs("window", c.Window)
 }

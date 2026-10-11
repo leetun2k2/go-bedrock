@@ -1,155 +1,112 @@
-// Package ratelimitx provides a distributed token-bucket rate limiter backed
-// by Redis. Refill and consume run in one atomic Lua script keyed off Redis
-// server time, so concurrent callers never spend the same token.
+// Package ratelimitx provides distributed rate limiters backed by Redis:
+// fixed window, token bucket, leaky bucket meter, and sliding window
+// counter. Each algorithm is selected through an explicit constructor and
+// shares one Limiter contract. Every decision runs in one atomic Lua script
+// keyed off Redis server time, so concurrent callers never overspend the
+// same capacity.
 package ratelimitx
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
 	"github.com/leetun2k2/go-bedrock/redisx"
-	"github.com/redis/go-redis/v9"
 )
-
-// tokenBucketScript refills a bucket by elapsed Redis server time and
-// deducts cost if enough tokens are available. KEYS[1] is the bucket key.
-// ARGV: capacity, refillAmount, refillIntervalMs, cost, ttlSeconds.
-// Returns {allowed (0/1), remaining tokens, retryAfterMs}.
-const tokenBucketScript = `
-local capacity = tonumber(ARGV[1])
-local refill_amount = tonumber(ARGV[2])
-local refill_interval_ms = tonumber(ARGV[3])
-local cost = tonumber(ARGV[4])
-local ttl_seconds = tonumber(ARGV[5])
-
-local time_parts = redis.call('TIME')
-local now_ms = tonumber(time_parts[1]) * 1000 + math.floor(tonumber(time_parts[2]) / 1000)
-
-local tokens = capacity
-local last_refill = now_ms
-
-local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
-if bucket[1] and bucket[2] then
-	tokens = tonumber(bucket[1])
-	last_refill = tonumber(bucket[2])
-
-	local elapsed = now_ms - last_refill
-	if elapsed > 0 then
-		local intervals = math.floor(elapsed / refill_interval_ms)
-		if intervals > 0 then
-			tokens = math.min(capacity, tokens + intervals * refill_amount)
-			last_refill = last_refill + intervals * refill_interval_ms
-		end
-	end
-end
-
-local allowed = 0
-local retry_after_ms = 0
-
-if tokens >= cost then
-	tokens = tokens - cost
-	allowed = 1
-else
-	local deficit = cost - tokens
-	local intervals_needed = math.ceil(deficit / refill_amount)
-	retry_after_ms = (last_refill + intervals_needed * refill_interval_ms) - now_ms
-	if retry_after_ms < 0 then
-		retry_after_ms = 0
-	end
-end
-
-redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', last_refill)
-redis.call('EXPIRE', KEYS[1], ttl_seconds)
-
-return {allowed, tokens, retry_after_ms}
-`
 
 // Result reports the outcome of an Allow call.
 type Result struct {
-	// Allowed reports whether the request was permitted.
+	// Allowed reports whether the requested cost was admitted.
 	Allowed bool
-	// Remaining is the number of tokens left in the bucket after the call.
+	// Remaining is the number of units still available at the current instant.
 	Remaining int64
-	// RetryAfter is how long to wait before the bucket holds enough tokens.
-	// It is zero when Allowed is true.
+	// RetryAfter is the earliest wait after which the same cost may pass,
+	// assuming no other accepted request. It is zero when Allowed is true.
 	RetryAfter time.Duration
 }
 
-// Limiter is a distributed token-bucket rate limiter. It is safe for
-// concurrent use and does not own the Redis connection it borrows.
-type Limiter struct {
-	client           *redis.Client
-	prefix           string
-	capacity         int64
-	refillAmount     int64
-	refillIntervalMs int64
-	ttlSeconds       int64
-	script           *redis.Script
+// Limiter decides whether a weighted request may proceed. Implementations
+// are safe for concurrent use and do not own the Redis connection they
+// borrow.
+type Limiter interface {
+	// Allow attempts to admit cost units for key. A cost above the
+	// algorithm's configured limit or capacity returns a validation error
+	// without touching Redis.
+	Allow(ctx context.Context, key string, cost int64) (Result, error)
 }
 
-// New constructs a Limiter backed by client using cfg. New validates cfg and
-// returns an error without touching Redis if the configuration is invalid.
-func New(client *redisx.Client, cfg Config) (*Limiter, error) {
+// validateClient reports whether client is usable.
+func validateClient(client *redisx.Client) error {
 	if client == nil {
-		return nil, errors.New("ratelimitx: client must not be nil")
+		return errors.New("ratelimitx: client must not be nil")
 	}
-
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
-	refillIntervalMs := cfg.RefillInterval.Milliseconds()
-	if refillIntervalMs <= 0 {
-		return nil, fmt.Errorf("ratelimitx: refill interval must be at least 1ms: %s", cfg.RefillInterval)
-	}
-
-	fillIntervals := int64(math.Ceil(float64(cfg.Capacity) / float64(cfg.RefillAmount)))
-	ttl := cfg.RefillInterval * time.Duration(fillIntervals+1)
-	ttlSeconds := int64(math.Ceil(ttl.Seconds()))
-	if ttlSeconds < 1 {
-		ttlSeconds = 1
-	}
-
-	return &Limiter{
-		client:           client.Client(),
-		prefix:           cfg.Prefix,
-		capacity:         cfg.Capacity,
-		refillAmount:     cfg.RefillAmount,
-		refillIntervalMs: refillIntervalMs,
-		ttlSeconds:       ttlSeconds,
-		script:           redis.NewScript(tokenBucketScript),
-	}, nil
+	return nil
 }
 
-// Allow attempts to consume cost tokens from the bucket identified by key.
-// The first call for a key starts with a full bucket. Tokens refill by
-// elapsed Redis server time up to the configured capacity.
-func (l *Limiter) Allow(ctx context.Context, key string, cost int64) (Result, error) {
+// validatePrefix reports whether prefix is usable as a key namespace.
+func validatePrefix(prefix string) error {
+	if strings.TrimSpace(prefix) == "" {
+		return errors.New("ratelimitx: prefix must not be empty")
+	}
+	return nil
+}
+
+// validatePositive reports whether v is a usable positive quantity for a
+// field named name.
+func validatePositive(name string, v int64) error {
+	if v <= 0 {
+		return fmt.Errorf("ratelimitx: %s must be greater than zero: %d", name, v)
+	}
+	return nil
+}
+
+// validateIntervalMs reports whether d is a usable whole-millisecond
+// interval for a field named name, and returns it in milliseconds.
+// Sub-millisecond intervals are rejected rather than truncated, since
+// truncation would silently make a limiter more permissive.
+func validateIntervalMs(name string, d time.Duration) (int64, error) {
+	if d < time.Millisecond {
+		return 0, fmt.Errorf("ratelimitx: %s must be at least 1ms: %s", name, d)
+	}
+
+	if d%time.Millisecond != 0 {
+		return 0, fmt.Errorf("ratelimitx: %s must be aligned to a millisecond: %s", name, d)
+	}
+
+	return d.Milliseconds(), nil
+}
+
+// validateKeyCost reports whether key and cost are usable for an Allow call
+// against a limit or capacity of max.
+func validateKeyCost(key string, cost, max int64) error {
 	if strings.TrimSpace(key) == "" {
-		return Result{}, errors.New("ratelimitx: key must not be empty")
+		return errors.New("ratelimitx: key must not be empty")
 	}
 
 	if cost <= 0 {
-		return Result{}, fmt.Errorf("ratelimitx: cost must be greater than zero: %d", cost)
+		return fmt.Errorf("ratelimitx: cost must be greater than zero: %d", cost)
 	}
 
-	if cost > l.capacity {
-		return Result{}, fmt.Errorf("ratelimitx: cost %d exceeds capacity %d", cost, l.capacity)
+	if cost > max {
+		return fmt.Errorf("ratelimitx: cost %d exceeds limit %d", cost, max)
 	}
 
-	bucketKey := l.prefix + ":" + key
+	return nil
+}
 
-	res, err := l.script.Run(ctx, l.client, []string{bucketKey},
-		l.capacity, l.refillAmount, l.refillIntervalMs, cost, l.ttlSeconds,
-	).Result()
-	if err != nil {
-		return Result{}, fmt.Errorf("ratelimitx: allow: %w", err)
+// toInt64 converts a script reply element to int64.
+func toInt64(v interface{}) (int64, error) {
+	i, ok := v.(int64)
+	if !ok {
+		return 0, fmt.Errorf("expected int64, got %T", v)
 	}
+	return i, nil
+}
 
+// parseResult converts a three-element Lua script reply into a Result.
+func parseResult(res interface{}) (Result, error) {
 	values, ok := res.([]interface{})
 	if !ok || len(values) != 3 {
 		return Result{}, fmt.Errorf("ratelimitx: allow: unexpected script result: %v", res)
@@ -175,13 +132,4 @@ func (l *Limiter) Allow(ctx context.Context, key string, cost int64) (Result, er
 		Remaining:  remaining,
 		RetryAfter: time.Duration(retryAfterMs) * time.Millisecond,
 	}, nil
-}
-
-// toInt64 converts a script reply element to int64.
-func toInt64(v interface{}) (int64, error) {
-	i, ok := v.(int64)
-	if !ok {
-		return 0, fmt.Errorf("expected int64, got %T", v)
-	}
-	return i, nil
 }
