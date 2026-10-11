@@ -97,8 +97,8 @@ type Job struct {
 	ID string
 	// Payload is the opaque data supplied at Enqueue time.
 	Payload []byte
-	// Attempts counts how many times this job has been claimed, including
-	// the current attempt.
+	// Attempts counts earlier NACK or reclaim operations. It is zero on the
+	// first delivery.
 	Attempts int
 
 	claimToken string

@@ -110,9 +110,8 @@ func New(client *redisx.Client, cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Create creates series with opts. Create is idempotent only when an
-// existing series already has a compatible configuration; Redis otherwise
-// returns an error.
+// Create creates series with opts. Redis returns an error if the key already
+// exists.
 func (c *Client) Create(ctx context.Context, series string, opts CreateOptions) error {
 	if err := validateSeries(series); err != nil {
 		return err

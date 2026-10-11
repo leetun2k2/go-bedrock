@@ -1,11 +1,38 @@
 # redisx
 
-`redisx` manages a production-ready standalone Redis client backed by `go-redis/v9` and adapts it to the shared `serverx.Component` lifecycle.
+`redisx` provides a standalone Redis client and focused extensions built on
+`go-redis/v9`. The base client validates config, checks the connection with
+`PING`, and integrates with the `serverx.Component` lifecycle.
 
-It provides safe connection, timeout, and pool defaults, validates configuration, verifies Redis connectivity on startup with `Ping`, exposes the underlying `*redis.Client` for Redis commands and pipelines, and performs safe, idempotent, deadline-bounded graceful shutdown.
+```mermaid
+flowchart LR
+    Service --> Client[redisx client]
+    Client --> Redis
+    Service --> Extension
+    Extension --> Client
+```
 
-`redisx` targets single-node Redis deployments and exposes the concrete `*redis.Client` rather than `redis.UniversalClient` to keep the API surface minimal, direct, and free of multi-node routing overhead.
+## Extensions
 
-Use it for Redis access in services running under `serverx`.
+| Package | Use | Redis requirement |
+|---|---|---|
+| [cachex](cachex/README.md) | Cache-aside with stampede control | Redis |
+| [featurestorex](featurestorex/README.md) | Online feature hashes | Redis 7.4+ for field TTL |
+| [leaderboardx](leaderboardx/README.md) | Ranked boards and metadata | Redis |
+| [matchingx](matchingx/README.md) | Vector matching with filters | Redis Search |
+| [memoryx](memoryx/README.md) | Agent state, semantic memory, and events | Redis Search and JSON |
+| [prefetchx](prefetchx/README.md) | Bulk-loaded reference cache | Redis |
+| [pubsubx](pubsubx/README.md) | Live channel broadcasts | Redis |
+| [queuex](queuex/README.md) | At-least-once job queue | Redis |
+| [ratelimitx](ratelimitx/README.md) | Distributed rate limits | Redis |
+| [semanticcachex](semanticcachex/README.md) | LLM response cache by similarity | Redis Search |
+| [sessionx](sessionx/README.md) | Server-side web sessions | Redis |
+| [streamx](streamx/README.md) | Durable event consumers | Redis 6.2+ |
+| [timeseriesx](timeseriesx/README.md) | Numeric time series and rollups | Redis TimeSeries |
 
-See [USAGE.md](USAGE.md) for installation and a complete example.
+All extensions borrow a Redis connection. Most accept `*redisx.Client`;
+`sessionx` accepts its underlying `*redis.Client`. The application owns and
+closes the base client. The module targets single-node Redis, not Redis Cluster.
+
+See [USAGE.md](USAGE.md) for base client setup. Each extension has its own
+`README.md` and `USAGE.md`.

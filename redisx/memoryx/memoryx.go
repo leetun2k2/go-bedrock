@@ -119,8 +119,8 @@ func New(client *redisx.Client, cfg Config) (*Memory, error) {
 	}, nil
 }
 
-// SaveState replaces threadID's working-memory hash with state and refreshes
-// its TTL.
+// SaveState writes state to threadID's working-memory hash and refreshes its
+// TTL. Existing fields omitted from state remain unchanged.
 func (m *Memory) SaveState(ctx context.Context, threadID string, state map[string]string) error {
 	if strings.TrimSpace(threadID) == "" {
 		return errors.New("memoryx: thread id must not be empty")

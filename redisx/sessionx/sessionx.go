@@ -1,4 +1,4 @@
-// Package sessionstore provides a Redis-backed session store for Go web applications.
+// Package sessionx provides a Redis-backed session store for Go web applications.
 //
 // It stores session data in Redis hashes and uses key expiration to remove
 // inactive sessions automatically.

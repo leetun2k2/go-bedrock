@@ -86,9 +86,8 @@ func New(client *redisx.Client, cfg Config) (*Matcher, error) {
 	}, nil
 }
 
-// CreateIndex creates the Redis Search index used by Match. CreateIndex is
-// idempotent only when an existing index already has a compatible schema;
-// Redis otherwise returns an error.
+// CreateIndex creates the Redis Search index used by Match. It returns nil when
+// an index with the same name already exists, without checking its schema.
 func (m *Matcher) CreateIndex(ctx context.Context) error {
 	args := []interface{}{
 		"FT.CREATE", m.indexName,

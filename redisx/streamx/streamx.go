@@ -24,9 +24,9 @@ type Message struct {
 }
 
 // Handler processes one message. Returning nil acknowledges the message,
-// removing it from the pending entries list. Returning an error, or taking
-// longer than the configured HandlerTimeout, leaves the message pending so
-// it becomes claimable again.
+// removing it from the pending entries list. Returning an error leaves the
+// message pending so it becomes claimable again. Handler must honor the
+// deadline on ctx.
 type Handler func(ctx context.Context, msg Message) error
 
 // Client publishes to and consumes from a Redis stream through a consumer
@@ -276,10 +276,10 @@ func (c *Client) dispatch(ctx context.Context, sem chan struct{}, wg *sync.WaitG
 	}()
 }
 
-// process runs handler for msg, bounded by HandlerTimeout, and acknowledges
+// process runs handler for msg with a HandlerTimeout deadline and acknowledges
 // the message only on success. The handler and the acknowledgement use a
-// context detached from ctx's cancellation so an in-flight invocation
-// started before Close finishes cleanly instead of being aborted.
+// context detached from ctx's cancellation so an in-flight invocation started
+// before Close can finish cleanly.
 func (c *Client) process(ctx context.Context, handler Handler, msg Message) {
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.handlerTimeout)
 	defer cancel()

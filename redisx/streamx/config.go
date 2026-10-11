@@ -13,9 +13,9 @@ import (
 // stream retention via approximate trimming on Publish; zero means
 // unconstrained. Concurrency bounds how many handler invocations run at
 // once. MinIdleTime and ClaimInterval control how aggressively stale
-// pending entries are reclaimed via XAUTOCLAIM. HandlerTimeout bounds each
-// handler invocation. BlockTimeout bounds each XREADGROUP call so the read
-// loop can observe context cancellation promptly.
+// pending entries are reclaimed via XAUTOCLAIM. HandlerTimeout sets the
+// deadline on each handler context. BlockTimeout bounds each XREADGROUP call
+// so the read loop can observe context cancellation promptly.
 type Config struct {
 	Stream         string
 	Group          string

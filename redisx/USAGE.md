@@ -121,3 +121,31 @@ flowchart LR
 - Do not pass negative connection counts or timeouts.
 - Do not configure `MinIdleConns` greater than `PoolSize`.
 - Do not execute Redis commands after the client has closed.
+
+## Add an extension
+
+Create one base client and pass it to extensions. Extensions do not close it.
+
+```mermaid
+flowchart TD
+    Start[Create redisx client] --> Choose[Create extensions]
+    Choose --> Run[Run service]
+    Run --> Stop[Stop workers]
+    Stop --> Close[Close redisx client]
+```
+
+Use the package guide for config and behavior:
+
+- [cachex](cachex/USAGE.md)
+- [featurestorex](featurestorex/USAGE.md)
+- [leaderboardx](leaderboardx/USAGE.md)
+- [matchingx](matchingx/USAGE.md)
+- [memoryx](memoryx/USAGE.md)
+- [prefetchx](prefetchx/USAGE.md)
+- [pubsubx](pubsubx/USAGE.md)
+- [queuex](queuex/USAGE.md)
+- [ratelimitx](ratelimitx/USAGE.md)
+- [semanticcachex](semanticcachex/USAGE.md)
+- [sessionx](sessionx/USAGE.md)
+- [streamx](streamx/USAGE.md)
+- [timeseriesx](timeseriesx/USAGE.md)
