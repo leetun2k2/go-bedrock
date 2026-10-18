@@ -126,6 +126,7 @@ func (g *Provider) AuthorizationURL(req provider.AuthorizationRequest) (string, 
 	q.Set("scope", "openid email profile")
 	q.Set("state", req.State)
 	q.Set("nonce", req.Nonce)
+	q.Set("prompt", "select_account")
 
 	return g.authURL + "?" + q.Encode(), nil
 }
