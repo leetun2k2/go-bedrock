@@ -13,9 +13,15 @@ type Credentials struct {
 	ClientSecret string
 }
 
-// Extract extracts client credentials from either the HTTP Basic
-// Auth header or the X-Client-Id / X-Client-Secret header pair.
-// Supplying both forms, an incomplete form, or no credentials fails closed with ErrInvalidClient.
+// Extract extracts client credentials from either the HTTP Basic Auth
+// header or the X-Client-Id / X-Client-Secret header pair. Basic auth and
+// X-Client-Secret always require a non-empty secret (confidential client).
+// X-Client-Id alone, with no secret in either form, is returned with an
+// empty ClientSecret for a public client (e.g. a registered mobile app
+// using PKCE instead of a static secret); whether an empty secret is
+// acceptable is a policy decision for the caller, based on the resolved
+// registration's client type, not this extraction step. Supplying both
+// forms, or no credentials at all, fails closed with ErrInvalidClient.
 func Extract(r *http.Request) (Credentials, error) {
 	if r == nil {
 		return Credentials{}, ErrInvalidClient
@@ -39,11 +45,11 @@ func Extract(r *http.Request) (Credentials, error) {
 			return Credentials{}, ErrInvalidClient
 		}
 		return Credentials{ClientID: id, ClientSecret: secret}, nil
-	case hasHeader:
-		if strings.TrimSpace(headerID) == "" || strings.TrimSpace(headerSecret) == "" {
-			return Credentials{}, ErrInvalidClient
-		}
+	case headerID != "":
 		return Credentials{ClientID: headerID, ClientSecret: headerSecret}, nil
+	case hasHeader:
+		// X-Client-Secret with no X-Client-Id is never valid.
+		return Credentials{}, ErrInvalidClient
 	default:
 		return Credentials{}, ErrInvalidClient
 	}
