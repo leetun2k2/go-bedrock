@@ -12,6 +12,8 @@ No setup is required. Start with an existing non-nil `context.Context`.
 
 Built-in helpers store strings under the exported `Key...` constants. A missing value or a value of the wrong type returns the zero value.
 
+`SetIdentityID` / `GetIdentityID` use `KeyIdentityID` (`identity_id`) for the application's identity record ID. This is separate from user ID and provider subject. Session IDs stored with `SetSessionID` must be non-secret record IDs when used for logging.
+
 ## Integrate
 
 ```go

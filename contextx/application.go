@@ -7,6 +7,7 @@ import (
 const (
 	// Identity
 	KeyUserID          = "user_id"
+	KeyIdentityID      = "identity_id"
 	KeyAnonymousUserID = "anonymous_user_id"
 	KeyClientID        = "client_id"
 	KeyAccountID       = "account_id"
@@ -87,6 +88,14 @@ func SetUserID(ctx context.Context, value string) context.Context {
 
 func GetUserID(ctx context.Context) string {
 	return GetString(ctx, KeyUserID)
+}
+
+func SetIdentityID(ctx context.Context, value string) context.Context {
+	return SetString(ctx, KeyIdentityID, value)
+}
+
+func GetIdentityID(ctx context.Context) string {
+	return GetString(ctx, KeyIdentityID)
 }
 
 func SetAnonymousUserID(ctx context.Context, value string) context.Context {

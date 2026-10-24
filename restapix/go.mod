@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/leetun2k2/go-bedrock/logx v0.0.0-20261005143546-245254849566
 	github.com/leetun2k2/go-bedrock/serverx v0.0.0-20261005143546-245254849566
+	go.uber.org/zap v1.28.0
 )
 
 require (
@@ -44,7 +45,6 @@ require (
 	go.opentelemetry.io/otel v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/arch v0.29.0 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/net v0.57.0 // indirect

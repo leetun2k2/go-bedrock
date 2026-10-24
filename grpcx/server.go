@@ -22,6 +22,14 @@ type Server struct {
 // yet — callers obtain the *grpc.Server via GRPCServer and register their
 // services before calling Start.
 func New(cfg Config, logger *logx.Logger, opts ...grpc.ServerOption) *Server {
+	if cfg.CanonicalLogging {
+		logging := &canonicalHandler{logger: logger}
+		loggingOpts := []grpc.ServerOption{
+			grpc.StatsHandler(logging),
+			grpc.ChainUnaryInterceptor(logging.intercept),
+		}
+		opts = append(loggingOpts, opts...)
+	}
 	return &Server{
 		cfg:        cfg,
 		logger:     logger,

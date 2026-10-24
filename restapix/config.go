@@ -33,6 +33,9 @@ type Config struct {
 	Production bool   `json:"production" yaml:"production"`
 	Addr       string `json:"addr" yaml:"addr"`
 
+	// CanonicalLogging emits one unsampled summary per request. Disabled by default.
+	CanonicalLogging bool `json:"canonicalLogging" yaml:"canonicalLogging"`
+
 	ReadHeaderTimeout time.Duration `json:"readHeaderTimeout" yaml:"readHeaderTimeout"`
 	ReadTimeout       time.Duration `json:"readTimeout" yaml:"readTimeout"`
 	WriteTimeout      time.Duration `json:"writeTimeout" yaml:"writeTimeout"`

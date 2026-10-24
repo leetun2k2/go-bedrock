@@ -41,6 +41,9 @@ func New(cfg Config, logger *logx.Logger) (*Server, error) {
 	}
 
 	engine := gin.New()
+	if cfg.CanonicalLogging {
+		engine.Use(canonicalMiddleware)
+	}
 	engine.Use(recoveryMiddleware(logger))
 	engine.Use(sameSiteLaxMiddleware())
 
@@ -52,19 +55,20 @@ func New(cfg Config, logger *logx.Logger) (*Server, error) {
 		return nil, fmt.Errorf("restapix: trusted proxies: %w", err)
 	}
 
-	return &Server{
+	server := &Server{
 		cfg:    cfg,
 		logger: logger,
 		engine: engine,
 		httpServer: &http.Server{
 			Addr:              cfg.addr(),
-			Handler:           engine,
 			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 			ReadTimeout:       cfg.ReadTimeout,
 			WriteTimeout:      cfg.WriteTimeout,
 			IdleTimeout:       cfg.IdleTimeout,
 		},
-	}, nil
+	}
+	server.httpServer.Handler = server
+	return server, nil
 }
 
 // recoveryMiddleware recovers panics raised by downstream handlers, logs
@@ -72,6 +76,8 @@ func New(cfg Config, logger *logx.Logger) (*Server, error) {
 // terminate the process.
 func recoveryMiddleware(logger *logx.Logger) gin.HandlerFunc {
 	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		logx.AddFields(c.Request.Context(), "error", "panic")
+		c.Set(canonicalPanicKey, true)
 		logger.Error(c.Request.Context(), "restapix: panic recovered",
 			"error", recovered, "path", c.Request.URL.Path)
 		c.AbortWithStatus(http.StatusInternalServerError)

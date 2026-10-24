@@ -16,6 +16,12 @@ go get github.com/leetun2k2/go-bedrock/restapix@latest
 
 Negative timeout values are rejected.
 
+Set `CanonicalLogging` to `true` to emit one unsampled request summary. It is disabled by default. Summaries include the route template, final status, duration, and correlation IDs, including for rejected requests, unmatched routes, and recovered panics. They exclude raw URLs, query strings, and request bodies.
+
+`Start` installs the complete handler automatically. When serving directly or using `httptest`, pass the `Server` as the handler (`api.ServeHTTP`), and use `Engine` to register routes. Direct `Engine().ServeHTTP` calls bypass canonical summaries. Automatic router redirects use route `unmatched`.
+
+After authentication or starting a tracing span, call `logx.EnrichContext(ctx)` with the derived request context. Use `logx.AddFields(ctx, "order_id", "order-456")` for safe business fields; see [logx usage](../logx/USAGE.md#canonical-request-summaries).
+
 ## Integrate
 
 ```go
@@ -37,7 +43,7 @@ func healthHandler(c *gin.Context) {
 }
 
 func main() {
-	logger, err := logx.New(logx.LoggerConfig{Production: true})
+	logger, err := logx.New(&logx.LoggerConfig{Production: true})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -2,35 +2,46 @@ package logx
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type Logger struct {
-	logger *zap.Logger
-	sugar  *zap.SugaredLogger
+	logger    *zap.Logger
+	sugar     *zap.SugaredLogger
+	canonical *zap.Logger
 }
 
 // New creates a new Logger with the specified configuration.
 func New(cfg *LoggerConfig) (*Logger, error) {
-	var logger *zap.Logger
-	var err error
-
+	cfgZap := zap.NewDevelopmentConfig()
 	if cfg.Production {
-		logger, err = zap.NewProduction()
-	} else {
-		logger, err = zap.NewDevelopment()
+		cfgZap = zap.NewProductionConfig()
 	}
 
+	sampling := cfgZap.Sampling
+	cfgZap.Sampling = nil
+	canonical, err := cfgZap.Build()
 	if err != nil {
 		return nil, err
+	}
+
+	logger := canonical
+	if sampling != nil {
+		wrap := func(core zapcore.Core) zapcore.Core {
+			return zapcore.NewSamplerWithOptions(core, time.Second, sampling.Initial, sampling.Thereafter)
+		}
+		logger = canonical.WithOptions(zap.WrapCore(wrap))
 	}
 
 	sugar := logger.Sugar()
 
 	return &Logger{
-		logger: logger,
-		sugar:  sugar,
+		logger:    logger,
+		sugar:     sugar,
+		canonical: canonical,
 	}, nil
 }
 

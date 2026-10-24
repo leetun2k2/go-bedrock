@@ -12,6 +12,10 @@ go get github.com/leetun2k2/go-bedrock/grpcx@latest
 
 Pass gRPC server options, such as credentials and interceptors, after the logger in `New`.
 
+Set `Config.CanonicalLogging` to `true` to emit one unsampled summary per unary RPC. It is disabled by default; streaming RPCs are excluded. Existing unary interceptors and stats handlers still compose. The summary uses gRPC's completion status, including errors returned by outer authentication/recovery interceptors. Escaping handler panics still propagate.
+
+After authentication or starting a tracing span, call `logx.EnrichContext(ctx)`. Use `logx.AddFields(ctx, "order_id", "order-456")` for safe business fields; see [logx usage](../logx/USAGE.md#canonical-request-summaries).
+
 ## Integrate
 
 ```go
@@ -29,7 +33,7 @@ import (
 )
 
 func main() {
-	logger, err := logx.New(logx.LoggerConfig{Production: true})
+	logger, err := logx.New(&logx.LoggerConfig{Production: true})
 	if err != nil {
 		log.Fatal(err)
 	}
